@@ -194,7 +194,7 @@ def load_video_frames(
             img_std=img_std,
             compute_device=compute_device,
         )
-    elif is_str and os.path.isdir(video_path):
+    elif (is_str and os.path.isdir(video_path)) or isinstance(video_path, list):
         return load_video_frames_from_jpg_images(
             video_path=video_path,
             image_size=image_size,
@@ -229,6 +229,24 @@ def load_video_frames_from_jpg_images(
     """
     if isinstance(video_path, str) and os.path.isdir(video_path):
         jpg_folder = video_path
+        frame_names = [
+            p
+            for p in os.listdir(jpg_folder)
+            if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", ".png"]
+        ]
+        frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
+        num_frames = len(frame_names)
+        if num_frames == 0:
+            raise RuntimeError(f"no images found in {jpg_folder}")
+        img_paths = [os.path.join(jpg_folder, frame_name) for frame_name in frame_names]
+    
+    elif isinstance(video_path, list):
+        img_paths = video_path
+        num_frames = len(img_paths)
+        if num_frames == 0:
+            raise RuntimeError("No image paths provided.")
+        # jpg_folder = os.path.dirname(video_path[0]) if num_frames > 0 else ""
+
     else:
         raise NotImplementedError(
             "Only JPEG frames are supported at this moment. For video files, you may use "
@@ -240,16 +258,6 @@ def load_video_frames_from_jpg_images(
             "ffmpeg to start the JPEG file from 00000.jpg."
         )
 
-    frame_names = [
-        p
-        for p in os.listdir(jpg_folder)
-        if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
-    ]
-    frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
-    num_frames = len(frame_names)
-    if num_frames == 0:
-        raise RuntimeError(f"no images found in {jpg_folder}")
-    img_paths = [os.path.join(jpg_folder, frame_name) for frame_name in frame_names]
     img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None]
     img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None]
 
