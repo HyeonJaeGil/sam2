@@ -849,7 +849,7 @@ class SAM2Base(torch.nn.Module):
         (
             _,
             _,
-            _,
+            ious,
             low_res_masks,
             high_res_masks,
             obj_ptr,
@@ -863,6 +863,7 @@ class SAM2Base(torch.nn.Module):
             # Only add this in inference (to avoid unused param in activation checkpointing;
             # it's mainly used in the demo to encode spatial memories w/ consolidated masks)
             current_out["object_score_logits"] = object_score_logits
+            current_out["ious"] = ious
 
         # Finally run the memory encoder on the predicted mask to encode
         # it into a new memory feature (that can be used in future frames)

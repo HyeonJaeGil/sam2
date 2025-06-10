@@ -823,6 +823,7 @@ class SAM2VideoPredictor(SAM2Base):
         # object pointer is a small tensor, so we always keep it on GPU memory for fast access
         obj_ptr = current_out["obj_ptr"]
         object_score_logits = current_out["object_score_logits"]
+        ious = current_out["ious"]
         # make a compact version of this frame's output to reduce the state size
         compact_current_out = {
             "maskmem_features": maskmem_features,
@@ -830,6 +831,7 @@ class SAM2VideoPredictor(SAM2Base):
             "pred_masks": pred_masks,
             "obj_ptr": obj_ptr,
             "object_score_logits": object_score_logits,
+            "ious": ious,
         }
         return compact_current_out, pred_masks_gpu
 
