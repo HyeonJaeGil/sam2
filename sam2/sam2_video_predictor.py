@@ -94,6 +94,8 @@ class SAM2VideoPredictor(SAM2Base):
         # (we directly use their consolidated outputs during tracking)
         # metadata for each tracking frame (e.g. which direction it's tracked)
         inference_state["frames_tracked_per_obj"] = {}
+        # skip object indices from user's input (e.g. if they are not interested)
+        inference_state["skipped_obj_indices"] = set()
         # Warm up the visual backbone and cache the image feature on frame 0
         self._get_image_feature(inference_state, frame_idx=0, batch_size=1)
         return inference_state
@@ -156,6 +158,20 @@ class SAM2VideoPredictor(SAM2Base):
     def _get_obj_num(self, inference_state):
         """Get the total number of unique object ids received so far in this session."""
         return len(inference_state["obj_idx_to_id"])
+
+    def add_obj_id_to_skipped_indices(
+        self, inference_state, obj_id
+    ):
+        """Add an object id to the skipped object indices."""
+        obj_idx = self._obj_id_to_idx(inference_state, obj_id)
+        inference_state["skipped_obj_indices"].add(obj_idx)
+    
+    def remove_obj_id_from_skipped_indices(
+        self, inference_state, obj_id
+    ):
+        """Remove an object id from the skipped object indices."""
+        obj_idx = self._obj_id_to_idx(inference_state, obj_id)
+        inference_state["skipped_obj_indices"].discard(obj_idx)
 
     @torch.inference_mode()
     def add_new_points_or_box(
@@ -554,6 +570,15 @@ class SAM2VideoPredictor(SAM2Base):
         self.propagate_in_video_preflight(inference_state)
 
         obj_ids = inference_state["obj_ids"]
+        # Check if the user has skipped any objects
+        # If so, we will only track the objects that are not skipped
+        if inference_state["skipped_obj_indices"]:
+            obj_ids = [
+                obj_id
+                for obj_id in obj_ids
+                if inference_state["obj_id_to_idx"][obj_id]
+                not in inference_state["skipped_obj_indices"]
+            ]
         num_frames = inference_state["num_frames"]
         batch_size = self._get_obj_num(inference_state)
 
@@ -580,9 +605,13 @@ class SAM2VideoPredictor(SAM2Base):
             )
             processing_order = range(start_frame_idx, end_frame_idx + 1)
 
-        for frame_idx in tqdm(processing_order, desc="propagate in video"):
+        # for frame_idx in tqdm(processing_order, desc="propagate in video"):
+        for frame_idx in processing_order:
             pred_masks_per_obj = [None] * batch_size
             for obj_idx in range(batch_size):
+                # Skip this object if it's not in the user's interest
+                if obj_idx in inference_state["skipped_obj_indices"]:
+                    continue
                 obj_output_dict = inference_state["output_dict_per_obj"][obj_idx]
                 # We skip those frames already in consolidated outputs (these are frames
                 # that received input clicks or mask). Note that we cannot directly run
@@ -621,6 +650,8 @@ class SAM2VideoPredictor(SAM2Base):
             # Resize the output mask to the original video resolution (we directly use
             # the mask scores on GPU for output to avoid any CPU conversion in between)
             if len(pred_masks_per_obj) > 1:
+                # if there are None in pred_masks_per_obj, we will remove them
+                pred_masks_per_obj = [pm for pm in pred_masks_per_obj if pm is not None]
                 all_pred_masks = torch.cat(pred_masks_per_obj, dim=0)
             else:
                 all_pred_masks = pred_masks_per_obj[0]
