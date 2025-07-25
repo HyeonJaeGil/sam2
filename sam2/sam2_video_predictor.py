@@ -701,6 +701,41 @@ class SAM2VideoPredictor(SAM2Base):
         )
         return frame_idx, obj_ids, video_res_masks
 
+
+    @torch.inference_mode()
+    def clear_noncond_outputs_in_frame(
+        self, inference_state, frame_idx, obj_id, need_output=True
+    ):
+        """Remove all non-conditioning outputs in a specific frame for a given object."""
+        obj_idx = self._obj_id_to_idx(inference_state, obj_id)
+
+        tmp_output_dict_per_obj = inference_state["temp_output_dict_per_obj"]
+        tmp_output_dict_per_obj[obj_idx]["non_cond_frame_outputs"].pop(frame_idx, None)
+        
+        output_dict_per_obj = inference_state["output_dict_per_obj"]
+        output_dict_per_obj[obj_idx]["non_cond_frame_outputs"].pop(frame_idx, None)
+        
+        inference_state["frames_tracked_per_obj"][obj_idx].pop(frame_idx, None)
+        
+        if not need_output:
+            return
+        # Finally, output updated masks per object (after removing the inputs above)
+        obj_ids = inference_state["obj_ids"]
+        is_cond = any(
+            frame_idx in obj_temp_output_dict["cond_frame_outputs"]
+            for obj_temp_output_dict in tmp_output_dict_per_obj.values()
+        )
+        consolidated_out = self._consolidate_temp_output_across_obj(
+            inference_state,
+            frame_idx,
+            is_cond=is_cond,
+            consolidate_at_video_res=True,
+        )
+        _, video_res_masks = self._get_orig_video_res_output(
+            inference_state, consolidated_out["pred_masks_video_res"]
+        )
+        return frame_idx, obj_ids, video_res_masks
+
     @torch.inference_mode()
     def reset_state(self, inference_state):
         """Remove all input points or mask in all frames throughout the video."""
