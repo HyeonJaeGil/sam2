@@ -29,7 +29,7 @@ class SAM2VideoPredictor(SAM2Base):
         clear_non_cond_mem_around_input=False,
         # if `add_all_frames_to_correct_as_cond` is True, we also append to the conditioning frame list any frame that receives a later correction click
         # if `add_all_frames_to_correct_as_cond` is False, we conditioning frame list to only use those initial conditioning frames
-        add_all_frames_to_correct_as_cond=False,
+        add_all_frames_to_correct_as_cond=True,
         **kwargs,
     ):
         super().__init__(**kwargs)
