@@ -10,9 +10,11 @@ from collections import OrderedDict
 import torch
 import torch.nn.functional as F
 
+from loguru import logger
 from tqdm import tqdm
 
 from sam2.modeling.sam2_base import NO_OBJ_SCORE, SAM2Base
+from sam2.modeling.sam2_utils import select_closest_cond_frames
 from sam2.utils.misc import concat_points, fill_holes_in_mask_scores, load_video_frames
 
 
@@ -563,6 +565,7 @@ class SAM2VideoPredictor(SAM2Base):
         start_frame_idx=None,
         max_frame_num_to_track=None,
         reverse=False,
+        skip_frame_indices=None,
     ):
         """Propagate the input points across frames to track in the entire video."""
         self.propagate_in_video_preflight(inference_state)
@@ -601,6 +604,10 @@ class SAM2VideoPredictor(SAM2Base):
                 start_frame_idx + max_frame_num_to_track, num_frames - 1
             )
             processing_order = range(start_frame_idx, end_frame_idx + 1)
+        if skip_frame_indices is not None:
+            processing_order = [
+                idx for idx in processing_order if idx not in skip_frame_indices
+            ]
 
         # for frame_idx in tqdm(processing_order, desc="propagate in video"):
         for frame_idx in processing_order:
@@ -623,10 +630,17 @@ class SAM2VideoPredictor(SAM2Base):
                     if self.clear_non_cond_mem_around_input:
                         # clear non-conditioning memory of the surrounding frames
                         self._clear_obj_non_cond_mem_around_input(
-                            inference_state, frame_idx, obj_idx
-                        )
+                        inference_state, frame_idx, obj_idx
+                    )
                 else:
                     storage_key = "non_cond_frame_outputs"
+                    # self._log_attending_frames(
+                    #     obj_id=obj_id,
+                    #     frame_idx=frame_idx,
+                    #     output_dict=obj_output_dict,
+                    #     num_frames=num_frames,
+                    #     track_in_reverse=reverse,
+                    # )
                     current_out, pred_masks = self._run_single_frame_inference(
                         inference_state=inference_state,
                         output_dict=obj_output_dict,
@@ -657,6 +671,81 @@ class SAM2VideoPredictor(SAM2Base):
                 inference_state, all_pred_masks
             )
             yield frame_idx, obj_ids, video_res_masks
+
+    def get_frame_idx_dict(self, inference_state):
+        """
+        Collect conditioning and non-conditioning frame indices for every tracked object.
+
+        We consider both consolidated outputs and any temporary outputs that have not
+        been merged yet, and ensure conditioning frames take precedence if a frame
+        appears in both sets.
+        """
+        frame_idx_dict = {}
+        for obj_idx, obj_id in inference_state["obj_idx_to_id"].items():
+            obj_output_dict = inference_state["output_dict_per_obj"][obj_idx]
+            obj_temp_output_dict = inference_state["temp_output_dict_per_obj"][obj_idx]
+
+            cond_frame_inds = set(obj_output_dict["cond_frame_outputs"])
+            cond_frame_inds.update(obj_temp_output_dict["cond_frame_outputs"])
+
+            noncond_frame_inds = set(obj_output_dict["non_cond_frame_outputs"])
+            noncond_frame_inds.update(obj_temp_output_dict["non_cond_frame_outputs"])
+            # If a frame is conditioning, do not also label it as non-conditioning.
+            noncond_frame_inds.difference_update(cond_frame_inds)
+
+            frame_idx_dict[obj_id] = {
+                "cond_frame_idx": sorted(int(t) for t in cond_frame_inds),
+                "noncond_frame_idx": sorted(int(t) for t in noncond_frame_inds),
+            }
+
+        return frame_idx_dict
+
+    def _log_attending_frames(
+        self, obj_id, frame_idx, output_dict, num_frames, track_in_reverse
+    ):
+        cond_frames, noncond_frames = self._get_attending_frame_indices(
+            frame_idx, output_dict, num_frames, track_in_reverse
+        )
+        logger.debug(
+            "object {}: attending to conditioned frames {} and nonconditioned frames {}",
+            obj_id,
+            cond_frames if len(cond_frames) > 0 else "none",
+            noncond_frames if len(noncond_frames) > 0 else "none",
+        )
+
+    def _get_attending_frame_indices(
+        self, frame_idx, output_dict, num_frames, track_in_reverse
+    ):
+        # Conditioning frames used for attention on this step
+        cond_outputs = output_dict["cond_frame_outputs"]
+        selected_cond_outputs, unselected_cond_outputs = select_closest_cond_frames(
+            frame_idx, cond_outputs, self.max_cond_frames_in_attn
+        )
+        cond_frames = list(selected_cond_outputs.keys())
+
+        # Non-conditioning memories used on this step
+        noncond_frames = []
+        stride = 1 if self.training else self.memory_temporal_stride_for_eval
+        for t_pos in range(1, self.num_maskmem):
+            t_rel = self.num_maskmem - t_pos
+            if t_rel == 1:
+                prev_frame_idx = frame_idx - t_rel if not track_in_reverse else frame_idx + t_rel
+            else:
+                if not track_in_reverse:
+                    prev_frame_idx = ((frame_idx - 2) // stride) * stride
+                    prev_frame_idx = prev_frame_idx - (t_rel - 2) * stride
+                else:
+                    prev_frame_idx = -(-(frame_idx + 2) // stride) * stride
+                    prev_frame_idx = prev_frame_idx + (t_rel - 2) * stride
+            out = output_dict["non_cond_frame_outputs"].get(prev_frame_idx, None)
+            if out is None:
+                out = unselected_cond_outputs.get(prev_frame_idx, None)
+            if out is not None:
+                noncond_frames.append(prev_frame_idx)
+
+        cond_frames = sorted(set(int(t) for t in cond_frames))
+        noncond_frames = sorted(set(int(t) for t in noncond_frames))
+        return cond_frames, noncond_frames
 
     @torch.inference_mode()
     def clear_all_prompts_in_frame(
