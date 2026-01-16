@@ -445,8 +445,8 @@ class SAM2Base(torch.nn.Module):
             bbox_ious = self._compute_bbox_iou_for_multimasks(
                 high_res_multimasks, bbox_prior
             )
-            combined_scores = 0.5 * (ious + bbox_ious)
-            best_iou_inds = torch.argmax(combined_scores, dim=-1)
+            ious = 0.5 * (ious + bbox_ious) # override ious with bbox prior
+            best_iou_inds = torch.argmax(ious, dim=-1)
 
         batch_inds = torch.arange(B, device=device)
         low_res_masks = low_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
