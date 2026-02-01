@@ -39,6 +39,7 @@ class SAM2VideoPredictor(SAM2Base):
         self.non_overlap_masks = non_overlap_masks
         self.clear_non_cond_mem_around_input = clear_non_cond_mem_around_input
         self.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
+        self.log_attending_frames = True
 
     @torch.inference_mode()
     def init_state(
@@ -685,13 +686,15 @@ class SAM2VideoPredictor(SAM2Base):
                     )
                 else:
                     storage_key = "non_cond_frame_outputs"
-                    # self._log_attending_frames(
-                    #     obj_id=obj_id,
-                    #     frame_idx=frame_idx,
-                    #     output_dict=obj_output_dict,
-                    #     num_frames=num_frames,
-                    #     track_in_reverse=reverse,
-                    # )
+                    
+                    if self.log_attending_frames:
+                        self._log_attending_frames(
+                            obj_id=obj_id,
+                            frame_idx=frame_idx,
+                            output_dict=obj_output_dict,
+                            num_frames=num_frames,
+                            track_in_reverse=reverse,
+                        )
                     current_out, pred_masks = self._run_single_frame_inference(
                         inference_state=inference_state,
                         output_dict=obj_output_dict,

@@ -10,6 +10,8 @@ import torch.nn.functional as F
 
 from torch.nn.init import trunc_normal_
 
+from loguru import logger
+
 from sam2.modeling.sam.mask_decoder import MaskDecoder
 from sam2.modeling.sam.prompt_encoder import PromptEncoder
 from sam2.modeling.sam.transformer import TwoWayTransformer
@@ -445,8 +447,14 @@ class SAM2Base(torch.nn.Module):
             bbox_ious = self._compute_bbox_iou_for_multimasks(
                 high_res_multimasks, bbox_prior
             )
-            ious = 0.5 * (ious + bbox_ious) # override ious with bbox prior
+            ious = 0.9 * ious + 0.1 * bbox_ious
+            # if bbox_ious < 0.1, set the iou to zero to avoid selecting bad masks
+            ious = torch.where(bbox_ious < 0.1, torch.zeros_like(ious), ious)
             best_iou_inds = torch.argmax(ious, dim=-1)
+            # logger.debug(f"Using bbox prior (scores: {ious})")
+        else:
+            # logger.debug(f"Not using bbox prior (scores: {ious})")
+            pass
 
         batch_inds = torch.arange(B, device=device)
         low_res_masks = low_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
