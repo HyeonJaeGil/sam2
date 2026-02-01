@@ -10,10 +10,13 @@ import torch.nn.functional as F
 
 from torch.nn.init import trunc_normal_
 
+from loguru import logger
+
 from sam2.modeling.sam.mask_decoder import MaskDecoder
 from sam2.modeling.sam.prompt_encoder import PromptEncoder
 from sam2.modeling.sam.transformer import TwoWayTransformer
 from sam2.modeling.sam2_utils import get_1d_sine_pe, MLP, select_closest_cond_frames
+from sam2.utils.misc import mask_to_box
 
 # a large negative value as a placeholder score for missing objects
 NO_OBJ_SCORE = -1024.0
@@ -377,19 +380,18 @@ class SAM2Base(torch.nn.Module):
             align_corners=False,
         )
 
-        sam_output_token = sam_output_tokens[:, 0]
-        if multimask_output:
-            # take the best mask prediction (with the highest IoU estimation)
-            best_iou_inds = torch.argmax(ious, dim=-1)
-            batch_inds = torch.arange(B, device=device)
-            low_res_masks = low_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
-            high_res_masks = high_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
-            # use best iou_inds for ious
-            ious = ious[batch_inds, best_iou_inds].unsqueeze(1)
-            if sam_output_tokens.size(1) > 1:
-                sam_output_token = sam_output_tokens[batch_inds, best_iou_inds]
-        else:
-            low_res_masks, high_res_masks = low_res_multimasks, high_res_multimasks
+        (
+            low_res_masks,
+            high_res_masks,
+            ious,
+            sam_output_token,
+        ) = self._select_best_multimask(
+            low_res_multimasks=low_res_multimasks,
+            high_res_multimasks=high_res_multimasks,
+            ious=ious,
+            sam_output_tokens=sam_output_tokens,
+            multimask_output=multimask_output,
+        )
 
         # Extract object pointer from the SAM output token (with occlusion handling)
         obj_ptr = self.obj_ptr_proj(sam_output_token)
@@ -413,6 +415,85 @@ class SAM2Base(torch.nn.Module):
             obj_ptr,
             object_score_logits,
         )
+
+    def _select_best_multimask(
+        self,
+        low_res_multimasks,
+        high_res_multimasks,
+        ious,
+        sam_output_tokens,
+        multimask_output,
+    ):
+        """Select the best multimask output, optionally using a bbox prior."""
+        B = low_res_multimasks.size(0)
+        device = low_res_multimasks.device
+        sam_output_token = sam_output_tokens[:, 0]
+        if not multimask_output:
+            return (
+                low_res_multimasks,
+                high_res_multimasks,
+                ious,
+                sam_output_token,
+            )
+
+        best_iou_inds = torch.argmax(ious, dim=-1)
+        bbox_prior = getattr(self, "_bbox_prior", None)
+        if bbox_prior is not None and low_res_multimasks.size(1) > 1:
+            bbox_prior = bbox_prior.to(device)
+            if bbox_prior.dim() == 1:
+                bbox_prior = bbox_prior.unsqueeze(0)
+            if bbox_prior.size(0) == 1 and B > 1:
+                bbox_prior = bbox_prior.expand(B, -1)
+            bbox_ious = self._compute_bbox_iou_for_multimasks(
+                high_res_multimasks, bbox_prior
+            )
+            ious = 0.9 * ious + 0.1 * bbox_ious
+            # if bbox_ious < 0.1, set the iou to zero to avoid selecting bad masks
+            ious = torch.where(bbox_ious < 0.1, torch.zeros_like(ious), ious)
+            best_iou_inds = torch.argmax(ious, dim=-1)
+            # logger.debug(f"Using bbox prior (scores: {ious})")
+        else:
+            # logger.debug(f"Not using bbox prior (scores: {ious})")
+            pass
+
+        batch_inds = torch.arange(B, device=device)
+        low_res_masks = low_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
+        high_res_masks = high_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
+        ious = ious[batch_inds, best_iou_inds].unsqueeze(1)
+        if sam_output_tokens.size(1) > 1:
+            sam_output_token = sam_output_tokens[batch_inds, best_iou_inds]
+        return low_res_masks, high_res_masks, ious, sam_output_token
+
+    def _compute_bbox_iou_for_multimasks(self, high_res_multimasks, bbox_prior):
+        """Compute bbox IoU between multimask outputs and a prior bbox."""
+        B, M, H, W = high_res_multimasks.shape
+        mask_bools = high_res_multimasks > 0
+        mask_bools = mask_bools.reshape(B * M, 1, H, W)
+        mask_boxes = mask_to_box(mask_bools).reshape(B, M, 4).to(
+            high_res_multimasks.device
+        )
+        return self._bbox_iou(mask_boxes, bbox_prior)
+
+    @staticmethod
+    def _bbox_iou(boxes_a, boxes_b, eps=1e-6):
+        """Compute IoU between boxes_a [B, M, 4] and boxes_b [B, 4]."""
+        boxes_b = boxes_b.unsqueeze(1)
+        inter_x1 = torch.max(boxes_a[..., 0], boxes_b[..., 0])
+        inter_y1 = torch.max(boxes_a[..., 1], boxes_b[..., 1])
+        inter_x2 = torch.min(boxes_a[..., 2], boxes_b[..., 2])
+        inter_y2 = torch.min(boxes_a[..., 3], boxes_b[..., 3])
+        inter_w = (inter_x2 - inter_x1).clamp(min=0)
+        inter_h = (inter_y2 - inter_y1).clamp(min=0)
+        inter_area = inter_w * inter_h
+
+        area_a = (boxes_a[..., 2] - boxes_a[..., 0]).clamp(min=0) * (
+            boxes_a[..., 3] - boxes_a[..., 1]
+        ).clamp(min=0)
+        area_b = (boxes_b[..., 2] - boxes_b[..., 0]).clamp(min=0) * (
+            boxes_b[..., 3] - boxes_b[..., 1]
+        ).clamp(min=0)
+        union = area_a + area_b - inter_area
+        return inter_area / (union + eps)
 
     def _use_mask_as_output(self, backbone_features, high_res_features, mask_inputs):
         """
