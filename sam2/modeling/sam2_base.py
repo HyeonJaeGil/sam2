@@ -438,6 +438,7 @@ class SAM2Base(torch.nn.Module):
 
         best_iou_inds = torch.argmax(ious, dim=-1)
         bbox_prior = getattr(self, "_bbox_prior", None)
+        point_prior = getattr(self, "_point_prior", None)
         if bbox_prior is not None and low_res_multimasks.size(1) > 1:
             bbox_prior = bbox_prior.to(device)
             if bbox_prior.dim() == 1:
@@ -465,6 +466,20 @@ class SAM2Base(torch.nn.Module):
         else:
             # logger.debug(f"Not using bbox prior (scores: {ious})")
             pass
+        if point_prior is not None and low_res_multimasks.size(1) > 1:
+            point_prior = point_prior.to(device)
+            if point_prior.dim() == 1:
+                point_prior = point_prior.unsqueeze(0)
+            if point_prior.size(0) == 1 and B > 1:
+                point_prior = point_prior.expand(B, -1)
+            H, W = high_res_multimasks.shape[-2:]
+            x = point_prior[:, 0].round().long().clamp(0, W - 1)
+            y = point_prior[:, 1].round().long().clamp(0, H - 1)
+            batch_inds = torch.arange(B, device=device)
+            point_values = high_res_multimasks[batch_inds, :, y, x]
+            point_valid = point_values > 0
+            ious = torch.where(point_valid, ious, torch.zeros_like(ious))
+            best_iou_inds = torch.argmax(ious, dim=-1)
 
         batch_inds = torch.arange(B, device=device)
         low_res_masks = low_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
