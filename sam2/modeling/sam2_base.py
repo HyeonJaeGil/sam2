@@ -478,7 +478,18 @@ class SAM2Base(torch.nn.Module):
             batch_inds = torch.arange(B, device=device)
             point_values = high_res_multimasks[batch_inds, :, y, x]
             point_valid = point_values > 0
+            log_point_prior_usage = getattr(self, "log_point_prior_usage", False)
+            if log_point_prior_usage:
+                fmt = lambda xs: [f"{x:.4f}" for x in xs]
+                logger.debug(
+                    f"Using point prior (point_values: {fmt(point_values.detach().float().cpu().numpy().tolist()[0])}, "
+                    f"original ious: {fmt(ious.detach().float().cpu().numpy().tolist()[0])})"
+                )
             ious = torch.where(point_valid, ious, torch.zeros_like(ious))
+            if log_point_prior_usage:
+                logger.debug(
+                    f"Point prior filtered ious: {fmt(ious.detach().float().cpu().numpy().tolist()[0])}"
+                )
             best_iou_inds = torch.argmax(ious, dim=-1)
 
         batch_inds = torch.arange(B, device=device)

@@ -43,6 +43,7 @@ class SAM2VideoPredictor(SAM2Base):
         self.bbox_iou_threshold = 0.0  # threshold for bbox iou to consider bbox prior
         self.bbox_iou_weight = 0.0  # weight for bbox iou when combining with mask iou
         self.log_box_prior_usage = False
+        self.log_point_prior_usage = False
         
     @torch.inference_mode()
     def init_state(
