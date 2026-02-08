@@ -475,14 +475,21 @@ class SAM2Base(torch.nn.Module):
             H, W = high_res_multimasks.shape[-2:]
             x = point_prior[:, 0].round().long().clamp(0, W - 1)
             y = point_prior[:, 1].round().long().clamp(0, H - 1)
-            batch_inds = torch.arange(B, device=device)
-            point_values = high_res_multimasks[batch_inds, :, y, x]
-            point_valid = point_values > 0
+            mask_bools = high_res_multimasks > 0
+            mask_boxes = mask_to_box(mask_bools.view(-1, 1, H, W)).view(B, -1, 4)
+            x = x.unsqueeze(1)
+            y = y.unsqueeze(1)
+            point_valid = (
+                (x >= mask_boxes[..., 0])
+                & (y >= mask_boxes[..., 1])
+                & (x <= mask_boxes[..., 2])
+                & (y <= mask_boxes[..., 3])
+            )
             log_point_prior_usage = getattr(self, "log_point_prior_usage", False)
             if log_point_prior_usage:
                 fmt = lambda xs: [f"{x:.4f}" for x in xs]
                 logger.debug(
-                    f"Using point prior (point_values: {fmt(point_values.detach().float().cpu().numpy().tolist()[0])}, "
+                    f"Using point prior (point_valid: {fmt(point_valid.detach().float().cpu().numpy().tolist()[0])}, "
                     f"original ious: {fmt(ious.detach().float().cpu().numpy().tolist()[0])})"
                 )
             ious = torch.where(point_valid, ious, torch.zeros_like(ious))
