@@ -447,11 +447,21 @@ class SAM2Base(torch.nn.Module):
             bbox_ious = self._compute_bbox_iou_for_multimasks(
                 high_res_multimasks, bbox_prior
             )
-            ious = 0.9 * ious + 0.1 * bbox_ious
-            # if bbox_ious < 0.1, set the iou to zero to avoid selecting bad masks
-            ious = torch.where(bbox_ious < 0.1, torch.zeros_like(ious), ious)
+            bbox_iou_weight = getattr(self, "bbox_iou_weight", 0.0)
+            bbox_iou_threshold = getattr(self, "bbox_iou_threshold", 0.0)
+            
+            new_ious = bbox_iou_weight * ious + (1 - bbox_iou_weight) * bbox_ious
+            
+            log_box_prior_usage = getattr(self, "log_box_prior_usage", False)
+            if log_box_prior_usage:
+                fmt = lambda xs: [f"{x:.4f}" for x in xs]
+                logger.debug(
+                    f"Using bbox prior (bbox_ious: {fmt(bbox_ious.detach().float().cpu().numpy().tolist()[0])}, "
+                    f"original ious: {fmt(ious.detach().float().cpu().numpy().tolist()[0])}, "
+                    f"new ious: {fmt(new_ious.detach().float().cpu().numpy().tolist()[0])})"
+                )
+            ious = torch.where(bbox_ious < bbox_iou_threshold, torch.zeros_like(ious), new_ious)
             best_iou_inds = torch.argmax(ious, dim=-1)
-            # logger.debug(f"Using bbox prior (scores: {ious})")
         else:
             # logger.debug(f"Not using bbox prior (scores: {ious})")
             pass
