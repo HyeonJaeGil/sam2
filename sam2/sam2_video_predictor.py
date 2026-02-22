@@ -43,6 +43,7 @@ class SAM2VideoPredictor(SAM2Base):
         self.bbox_iou_threshold = 0.0  # threshold for bbox iou to consider bbox prior
         self.bbox_iou_weight = 0.0  # weight for bbox iou when combining with mask iou
         self.log_box_prior_usage = False
+        self.log_point_prior_usage = False
         
     @torch.inference_mode()
     def init_state(
@@ -84,6 +85,7 @@ class SAM2VideoPredictor(SAM2Base):
         inference_state["point_inputs_per_obj"] = {}
         inference_state["mask_inputs_per_obj"] = {}
         inference_state["bbox_prior_per_obj"] = {}
+        inference_state["point_prior_per_obj"] = {}
         # visual features on a small number of recently visited frames for quick interactions
         inference_state["cached_features"] = {}
         # values that don't change across frames (so we only need to hold one copy of them)
@@ -142,6 +144,7 @@ class SAM2VideoPredictor(SAM2Base):
             inference_state["point_inputs_per_obj"][obj_idx] = {}
             inference_state["mask_inputs_per_obj"][obj_idx] = {}
             inference_state["bbox_prior_per_obj"][obj_idx] = {}
+            inference_state["point_prior_per_obj"][obj_idx] = {}
             inference_state["output_dict_per_obj"][obj_idx] = {
                 "cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
                 "non_cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
@@ -290,6 +293,9 @@ class SAM2VideoPredictor(SAM2Base):
             bbox_prior=inference_state["bbox_prior_per_obj"][obj_idx].get(
                 frame_idx, None
             ),
+            point_prior=inference_state["point_prior_per_obj"][obj_idx].get(
+                frame_idx, None
+            ),
             is_init_cond_frame=is_init_cond_frame,
             point_inputs=point_inputs,
             mask_inputs=None,
@@ -331,6 +337,10 @@ class SAM2VideoPredictor(SAM2Base):
     ):
         """Add a bounding box prior for a specific frame and object."""
         obj_idx = self._obj_id_to_idx(inference_state, obj_id)
+        if inference_state["point_prior_per_obj"][obj_idx].get(frame_idx) is not None:
+            raise ValueError(
+                "Cannot set bounding box prior when a point prior is already set."
+            )
         if bbox is None:
             raise ValueError("bbox must be provided")
         if not isinstance(bbox, torch.Tensor):
@@ -350,6 +360,38 @@ class SAM2VideoPredictor(SAM2Base):
         inference_state["bbox_prior_per_obj"][obj_idx][frame_idx] = bbox
 
     @torch.inference_mode()
+    def add_point_prior(
+        self,
+        inference_state,
+        frame_idx,
+        obj_id,
+        point,
+    ):
+        """Add a point prior for a specific frame and object."""
+        obj_idx = self._obj_id_to_idx(inference_state, obj_id)
+        if inference_state["bbox_prior_per_obj"][obj_idx].get(frame_idx) is not None:
+            raise ValueError(
+                "Cannot set point prior when a bounding box prior is already set."
+            )
+        if point is None:
+            raise ValueError("point must be provided")
+        if not isinstance(point, torch.Tensor):
+            point = torch.tensor(point, dtype=torch.float32)
+        if point.numel() != 2:
+            raise ValueError("point must be a (2,) array in xy format")
+        point = point.reshape(2)
+
+        video_H = inference_state["video_height"]
+        video_W = inference_state["video_width"]
+        scale = torch.tensor(
+            [video_W, video_H], dtype=point.dtype, device=point.device
+        )
+        point = point / scale
+        point = point * self.image_size
+        point = point.to(inference_state["device"])
+        inference_state["point_prior_per_obj"][obj_idx][frame_idx] = point
+
+    @torch.inference_mode()
     def clear_bounding_box_prior(
         self,
         inference_state,
@@ -359,6 +401,17 @@ class SAM2VideoPredictor(SAM2Base):
         """Clear a bounding box prior for a specific frame and object."""
         obj_idx = self._obj_id_to_idx(inference_state, obj_id)
         inference_state["bbox_prior_per_obj"][obj_idx].pop(frame_idx, None)
+
+    @torch.inference_mode()
+    def clear_point_prior(
+        self,
+        inference_state,
+        frame_idx,
+        obj_id,
+    ):
+        """Clear a point prior for a specific frame and object."""
+        obj_idx = self._obj_id_to_idx(inference_state, obj_id)
+        inference_state["point_prior_per_obj"][obj_idx].pop(frame_idx, None)
 
     @torch.inference_mode()
     def add_new_mask(
@@ -419,6 +472,9 @@ class SAM2VideoPredictor(SAM2Base):
             frame_idx=frame_idx,
             batch_size=1,  # run on the slice of a single object
             bbox_prior=inference_state["bbox_prior_per_obj"][obj_idx].get(
+                frame_idx, None
+            ),
+            point_prior=inference_state["point_prior_per_obj"][obj_idx].get(
                 frame_idx, None
             ),
             is_init_cond_frame=is_init_cond_frame,
@@ -666,6 +722,10 @@ class SAM2VideoPredictor(SAM2Base):
                 inference_state["bbox_prior_per_obj"][obj_idx].get(frame_idx, None)
                 for obj_idx in range(batch_size)
             ]
+            point_priors_by_obj = [
+                inference_state["point_prior_per_obj"][obj_idx].get(frame_idx, None)
+                for obj_idx in range(batch_size)
+            ]
             pred_masks_per_obj = [None] * batch_size
             for obj_idx in range(batch_size):
                 # Skip this object if it's not in the user's interest
@@ -704,6 +764,7 @@ class SAM2VideoPredictor(SAM2Base):
                         frame_idx=frame_idx,
                         batch_size=1,  # run on the slice of a single object
                         bbox_prior=bbox_priors_by_obj[obj_idx],
+                        point_prior=point_priors_by_obj[obj_idx],
                         is_init_cond_frame=False,
                         point_inputs=None,
                         mask_inputs=None,
@@ -894,6 +955,7 @@ class SAM2VideoPredictor(SAM2Base):
         inference_state["point_inputs_per_obj"].clear()
         inference_state["mask_inputs_per_obj"].clear()
         inference_state["bbox_prior_per_obj"].clear()
+        inference_state["point_prior_per_obj"].clear()
         inference_state["output_dict_per_obj"].clear()
         inference_state["temp_output_dict_per_obj"].clear()
         inference_state["frames_tracked_per_obj"].clear()
@@ -905,6 +967,8 @@ class SAM2VideoPredictor(SAM2Base):
         for v in inference_state["mask_inputs_per_obj"].values():
             v.clear()
         for v in inference_state["bbox_prior_per_obj"].values():
+            v.clear()
+        for v in inference_state["point_prior_per_obj"].values():
             v.clear()
         for v in inference_state["output_dict_per_obj"].values():
             v["cond_frame_outputs"].clear()
@@ -955,6 +1019,7 @@ class SAM2VideoPredictor(SAM2Base):
         frame_idx,
         batch_size,
         bbox_prior,
+        point_prior,
         is_init_cond_frame,
         point_inputs,
         mask_inputs,
@@ -974,7 +1039,10 @@ class SAM2VideoPredictor(SAM2Base):
 
         # point and mask should not appear as input simultaneously on the same frame
         assert point_inputs is None or mask_inputs is None
+        if bbox_prior is not None and point_prior is not None:
+            raise ValueError("Only one of bbox_prior or point_prior can be set.")
         self._bbox_prior = bbox_prior
+        self._point_prior = point_prior
         try:
             current_out = self.track_step(
                 frame_idx=frame_idx,
@@ -992,6 +1060,7 @@ class SAM2VideoPredictor(SAM2Base):
             )
         finally:
             self._bbox_prior = None
+            self._point_prior = None
 
         # optionally offload the output to CPU memory to save GPU space
         storage_device = inference_state["storage_device"]
@@ -1149,6 +1218,7 @@ class SAM2VideoPredictor(SAM2Base):
         _map_keys(inference_state["point_inputs_per_obj"])
         _map_keys(inference_state["mask_inputs_per_obj"])
         _map_keys(inference_state["bbox_prior_per_obj"])
+        _map_keys(inference_state["point_prior_per_obj"])
         _map_keys(inference_state["output_dict_per_obj"])
         _map_keys(inference_state["temp_output_dict_per_obj"])
         _map_keys(inference_state["frames_tracked_per_obj"])
